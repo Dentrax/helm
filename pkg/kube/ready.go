@@ -18,7 +18,7 @@ package kube // import "helm.sh/helm/v3/pkg/kube"
 
 import (
 	"context"
-
+	"fmt"
 	appsv1 "k8s.io/api/apps/v1"
 	appsv1beta1 "k8s.io/api/apps/v1beta1"
 	appsv1beta2 "k8s.io/api/apps/v1beta2"
@@ -28,6 +28,7 @@ import (
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -57,6 +58,12 @@ func CheckJobs(checkJobs bool) ReadyCheckerOption {
 	}
 }
 
+func SchedulableNodesOnly(schedulableNodesOnly bool) ReadyCheckerOption {
+	return func(c *ReadyChecker) {
+		c.schedulableNodesOnly = schedulableNodesOnly
+	}
+}
+
 // NewReadyChecker creates a new checker. Passed ReadyCheckerOptions can
 // be used to override defaults.
 func NewReadyChecker(cl kubernetes.Interface, log func(string, ...interface{}), opts ...ReadyCheckerOption) ReadyChecker {
@@ -75,10 +82,12 @@ func NewReadyChecker(cl kubernetes.Interface, log func(string, ...interface{}), 
 
 // ReadyChecker is a type that can check core Kubernetes types for readiness.
 type ReadyChecker struct {
-	client        kubernetes.Interface
-	log           func(string, ...interface{})
-	checkJobs     bool
-	pausedAsReady bool
+	client               kubernetes.Interface
+	log                  func(string, ...interface{})
+	checkJobs            bool
+	pausedAsReady        bool
+	schedulableNodesOnly bool
+	schedulableNodes     []*corev1.Node
 }
 
 // IsReady checks if v is ready. It supports checking readiness for pods,
@@ -96,6 +105,19 @@ func (c *ReadyChecker) IsReady(ctx context.Context, v *resource.Info) (bool, err
 		ok  = true
 		err error
 	)
+
+	if c.schedulableNodesOnly {
+		c.schedulableNodes, err = c.ListSchedulableNodes(ctx)
+		if err != nil {
+			c.log("error listing schedulable nodes: %s", err)
+			return false, err
+		}
+		if len(c.schedulableNodes) == 0 {
+			c.log("no schedulable nodes found")
+			return false, nil
+		}
+	}
+
 	switch value := AsVersioned(v).(type) {
 	case *corev1.Pod:
 		pod, err := c.client.CoreV1().Pods(v.Namespace).Get(ctx, v.Name, metav1.GetOptions{})
@@ -213,8 +235,11 @@ func (c *ReadyChecker) podsforObject(ctx context.Context, namespace string, obj 
 
 // isPodReady returns true if a pod is ready; false otherwise.
 func (c *ReadyChecker) isPodReady(pod *corev1.Pod) bool {
-	for _, c := range pod.Status.Conditions {
-		if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+	if !c.CheckIfNodeNameAssignedSchedulableNode(pod.Spec.NodeName) {
+		return true
+	}
+	for _, p := range pod.Status.Conditions {
+		if p.Type == corev1.PodReady && p.Status == corev1.ConditionTrue {
 			return true
 		}
 	}
@@ -223,6 +248,9 @@ func (c *ReadyChecker) isPodReady(pod *corev1.Pod) bool {
 }
 
 func (c *ReadyChecker) jobReady(job *batchv1.Job) bool {
+	if !c.CheckIfNodeNameAssignedSchedulableNode(job.Spec.Template.Spec.NodeName) {
+		return true
+	}
 	if job.Status.Failed > *job.Spec.BackoffLimit {
 		c.log("Job is failed: %s/%s", job.GetNamespace(), job.GetName())
 		return false
@@ -274,6 +302,17 @@ func (c *ReadyChecker) volumeReady(v *corev1.PersistentVolumeClaim) bool {
 func (c *ReadyChecker) deploymentReady(rs *appsv1.ReplicaSet, dep *appsv1.Deployment) bool {
 	expectedReady := *dep.Spec.Replicas - deploymentutil.MaxUnavailable(*dep)
 	if !(rs.Status.ReadyReplicas >= expectedReady) {
+
+		if c.schedulableNodesOnly {
+			unschedulableCount, err := c.CheckIfPodsAssignedToUnschedulableNodes(context.Background(), rs.Namespace, rs.Spec.Selector)
+			if err != nil {
+				c.log("Deployment is not ready: %s/%s: %v", dep.Namespace, dep.Name, err.Error())
+				return false
+			}
+			c.log("Deployment is ready: %s/%s. %d out of %d expected pods are not ready on unschedulable Nodes", dep.Namespace, dep.Name, unschedulableCount, expectedReady)
+			return true
+		}
+
 		c.log("Deployment is not ready: %s/%s. %d out of %d expected pods are ready", dep.Namespace, dep.Name, rs.Status.ReadyReplicas, expectedReady)
 		return false
 	}
@@ -301,6 +340,17 @@ func (c *ReadyChecker) daemonSetReady(ds *appsv1.DaemonSet) bool {
 
 	expectedReady := int(ds.Status.DesiredNumberScheduled) - maxUnavailable
 	if !(int(ds.Status.NumberReady) >= expectedReady) {
+
+		if c.schedulableNodesOnly {
+			unschedulableCount, err := c.CheckIfPodsAssignedToUnschedulableNodes(context.Background(), ds.Namespace, ds.Spec.Selector)
+			if err != nil {
+				c.log("DaemonSet is not ready: %s/%s: %v", ds.Namespace, ds.Name, err.Error())
+				return false
+			}
+			c.log("DaemonSet is ready: %s/%s. %d out of %d expected pods are not ready on unschedulable Nodes", ds.Namespace, ds.Name, unschedulableCount, expectedReady)
+			return true
+		}
+
 		c.log("DaemonSet is not ready: %s/%s. %d out of %d expected pods are ready", ds.Namespace, ds.Name, ds.Status.NumberReady, expectedReady)
 		return false
 	}
@@ -390,8 +440,16 @@ func (c *ReadyChecker) statefulSetReady(sts *appsv1.StatefulSet) bool {
 	}
 
 	if int(sts.Status.ReadyReplicas) != replicas {
-		c.log("StatefulSet is not ready: %s/%s. %d out of %d expected pods are ready", sts.Namespace, sts.Name, sts.Status.ReadyReplicas, replicas)
-		return false
+		if c.schedulableNodesOnly {
+			_, err := c.CheckIfPodsAssignedToUnschedulableNodes(context.Background(), sts.Namespace, sts.Spec.Selector)
+			if err != nil {
+				c.log("StatefulSet is not ready: %s/%s: %v", sts.Namespace, sts.Name, err.Error())
+				return false
+			}
+		} else {
+			c.log("StatefulSet is not ready: %s/%s. %d out of %d expected pods are ready", sts.Namespace, sts.Name, sts.Status.ReadyReplicas, replicas)
+			return false
+		}
 	}
 
 	if sts.Status.CurrentRevision != sts.Status.UpdateRevision {
@@ -408,4 +466,104 @@ func getPods(ctx context.Context, client kubernetes.Interface, namespace, select
 		LabelSelector: selector,
 	})
 	return list.Items, err
+}
+
+func getPodsWithLabelSelector(ctx context.Context, client kubernetes.Interface, namespace string, selector *metav1.LabelSelector) ([]corev1.Pod, error) {
+	list, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fields.Everything().String(),
+		LabelSelector: selector.String(),
+	})
+	return list.Items, err
+}
+
+func (c *ReadyChecker) ListSchedulableNodes(ctx context.Context) ([]*corev1.Node, error) {
+	nodes, err := c.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return []*corev1.Node{}, err
+	}
+
+	readyNodes := make([]*corev1.Node, 0, len(nodes.Items))
+	for _, node := range nodes.Items {
+		if c.IsNodeSchedulable(&node) {
+			readyNodes = append(readyNodes, &node)
+		}
+	}
+
+	return readyNodes, nil
+}
+
+// IsNodeSchedulable checks if given Node is schedulable
+func (c *ReadyChecker) IsNodeSchedulable(node *corev1.Node) bool {
+	// check if node not unschedulable
+	if node.Spec.Unschedulable {
+		c.log("Ignoring Node since it is unschedulable: %s", node.Name)
+		return false
+	}
+
+	// check if NodeReady condition is not True
+	for i := range node.Status.Conditions {
+		cond := &node.Status.Conditions[i]
+		if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
+			c.log("Ignoring Node due to type %s status %s: %s", node.Name, cond.Type, cond.Status)
+			return false
+		}
+	}
+
+	//check if node does not have any NoSchedule taints
+	for _, taint := range node.Spec.Taints {
+		if taint.Effect == corev1.TaintEffectNoSchedule || taint.Effect == corev1.TaintEffectPreferNoSchedule {
+			c.log("Ignoring Node since there is NoSchedule Taint effect: %s", taint.Key)
+			return false
+		}
+	}
+
+	return true
+}
+
+func (c *ReadyChecker) CheckIfNodeNameAssignedSchedulableNode(nodeName string) bool {
+	if !c.schedulableNodesOnly {
+		return true
+	}
+	for _, node := range c.schedulableNodes {
+		if node.Name == nodeName {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *ReadyChecker) CheckIfPodsAssignedToUnschedulableNodes(ctx context.Context, namespace string, selector *metav1.LabelSelector) (int, error) {
+	pods, err := getPodsWithLabelSelector(ctx, c.client, namespace, selector)
+	if err != nil {
+		return 0, fmt.Errorf("error getting pods with label selector %s: %s", selector.String(), err)
+	}
+
+	var notReadyPods []corev1.Pod
+	for _, pod := range pods {
+		if !c.isPodReady(&pod) {
+			notReadyPods = append(notReadyPods, pod)
+		}
+	}
+
+	if len(notReadyPods) == 0 {
+		return 0, nil
+	}
+
+	notReadyPodsOnUnschedulableNodesCount := 0
+	// Check if all unavailable pods with NotReady conditions going to be scheduled on unschedulable nodes
+	for _, pod := range notReadyPods {
+		if !c.CheckIfNodeNameAssignedSchedulableNode(pod.Spec.NodeName) {
+			// since one of the pods going to be scheduled on schedulable node
+			// we can ensure that the deployment is NOT "really" ready
+			c.log("Pod %s is not ready and it is scheduled on unschedulable node %s", pod.Name, pod.Spec.NodeName)
+			notReadyPodsOnUnschedulableNodesCount++
+		}
+	}
+
+	if len(notReadyPods) == notReadyPodsOnUnschedulableNodesCount {
+		c.log("All Pods with Ready conditions are scheduled on schedulable Nodes whereas all Pods with NotReady conditions are scheduled on unschedulable nodes")
+		return 0, nil
+	}
+
+	return notReadyPodsOnUnschedulableNodesCount, fmt.Errorf("%d Pods with Ready conditions are scheduled on schedulable Nodes whereas %d Pods with NotReady conditions are scheduled on unschedulable nodes", len(notReadyPods)-notReadyPodsOnUnschedulableNodesCount, notReadyPodsOnUnschedulableNodesCount)
 }

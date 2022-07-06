@@ -75,6 +75,7 @@ type Install struct {
 	Replace                  bool
 	Wait                     bool
 	WaitForJobs              bool
+	WaitIgnoreUnschedulable  bool
 	Devel                    bool
 	DependencyUpdate         bool
 	Timeout                  time.Duration
@@ -166,7 +167,7 @@ func (i *Install) installCRDs(crds []chart.CRD) error {
 		discoveryClient.Invalidate()
 		// Give time for the CRD to be recognized.
 
-		if err := i.cfg.KubeClient.Wait(totalItems, 60*time.Second); err != nil {
+		if err := i.cfg.KubeClient.Wait(totalItems, 60*time.Second, false); err != nil {
 			return err
 		}
 
@@ -380,12 +381,12 @@ func (i *Install) performInstall(c chan<- resultMessage, rel *release.Release, t
 
 	if i.Wait {
 		if i.WaitForJobs {
-			if err := i.cfg.KubeClient.WaitWithJobs(resources, i.Timeout); err != nil {
+			if err := i.cfg.KubeClient.WaitWithJobs(resources, i.Timeout, i.WaitIgnoreUnschedulable); err != nil {
 				i.reportToRun(c, rel, err)
 				return
 			}
 		} else {
-			if err := i.cfg.KubeClient.Wait(resources, i.Timeout); err != nil {
+			if err := i.cfg.KubeClient.Wait(resources, i.Timeout, i.WaitIgnoreUnschedulable); err != nil {
 				i.reportToRun(c, rel, err)
 				return
 			}

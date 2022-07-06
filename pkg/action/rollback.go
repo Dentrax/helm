@@ -35,16 +35,17 @@ import (
 type Rollback struct {
 	cfg *Configuration
 
-	Version       int
-	Timeout       time.Duration
-	Wait          bool
-	WaitForJobs   bool
-	DisableHooks  bool
-	DryRun        bool
-	Recreate      bool // will (if true) recreate pods after a rollback.
-	Force         bool // will (if true) force resource upgrade through uninstall/recreate if needed
-	CleanupOnFail bool
-	MaxHistory    int // MaxHistory limits the maximum number of revisions saved per release
+	Version                 int
+	Timeout                 time.Duration
+	Wait                    bool
+	WaitForJobs             bool
+	WaitIgnoreUnschedulable bool
+	DisableHooks            bool
+	DryRun                  bool
+	Recreate                bool // will (if true) recreate pods after a rollback.
+	Force                   bool // will (if true) force resource upgrade through uninstall/recreate if needed
+	CleanupOnFail           bool
+	MaxHistory              int // MaxHistory limits the maximum number of revisions saved per release
 }
 
 // NewRollback creates a new Rollback object with the given configuration.
@@ -206,14 +207,14 @@ func (r *Rollback) performRollback(currentRelease, targetRelease *release.Releas
 
 	if r.Wait {
 		if r.WaitForJobs {
-			if err := r.cfg.KubeClient.WaitWithJobs(target, r.Timeout); err != nil {
+			if err := r.cfg.KubeClient.WaitWithJobs(target, r.Timeout, r.WaitIgnoreUnschedulable); err != nil {
 				targetRelease.SetStatus(release.StatusFailed, fmt.Sprintf("Release %q failed: %s", targetRelease.Name, err.Error()))
 				r.cfg.recordRelease(currentRelease)
 				r.cfg.recordRelease(targetRelease)
 				return targetRelease, errors.Wrapf(err, "release %s failed", targetRelease.Name)
 			}
 		} else {
-			if err := r.cfg.KubeClient.Wait(target, r.Timeout); err != nil {
+			if err := r.cfg.KubeClient.Wait(target, r.Timeout, r.WaitIgnoreUnschedulable); err != nil {
 				targetRelease.SetStatus(release.StatusFailed, fmt.Sprintf("Release %q failed: %s", targetRelease.Name, err.Error()))
 				r.cfg.recordRelease(currentRelease)
 				r.cfg.recordRelease(targetRelease)

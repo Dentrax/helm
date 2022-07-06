@@ -133,12 +133,12 @@ func (c *Client) Create(resources ResourceList) (*Result, error) {
 }
 
 // Wait waits up to the given timeout for the specified resources to be ready.
-func (c *Client) Wait(resources ResourceList, timeout time.Duration) error {
+func (c *Client) Wait(resources ResourceList, timeout time.Duration, ignoreUnschedulable bool) error {
 	cs, err := c.getKubeClient()
 	if err != nil {
 		return err
 	}
-	checker := NewReadyChecker(cs, c.Log, PausedAsReady(true))
+	checker := NewReadyChecker(cs, c.Log, PausedAsReady(true), SchedulableNodesOnly(ignoreUnschedulable))
 	w := waiter{
 		c:       checker,
 		log:     c.Log,
@@ -148,12 +148,12 @@ func (c *Client) Wait(resources ResourceList, timeout time.Duration) error {
 }
 
 // WaitWithJobs wait up to the given timeout for the specified resources to be ready, including jobs.
-func (c *Client) WaitWithJobs(resources ResourceList, timeout time.Duration) error {
+func (c *Client) WaitWithJobs(resources ResourceList, timeout time.Duration, ignoreUnschedulable bool) error {
 	cs, err := c.getKubeClient()
 	if err != nil {
 		return err
 	}
-	checker := NewReadyChecker(cs, c.Log, PausedAsReady(true), CheckJobs(true))
+	checker := NewReadyChecker(cs, c.Log, PausedAsReady(true), CheckJobs(true), SchedulableNodesOnly(ignoreUnschedulable))
 	w := waiter{
 		c:       checker,
 		log:     c.Log,

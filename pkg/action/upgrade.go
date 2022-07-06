@@ -67,6 +67,8 @@ type Upgrade struct {
 	Wait bool
 	// WaitForJobs determines whether the wait operation for the Jobs should be performed after the upgrade is requested.
 	WaitForJobs bool
+	// WaitIgnoreUnschedulable determines whether the wait operation should be only respected for schedulable Nodes.
+	WaitIgnoreUnschedulable bool
 	// DisableHooks disables hook processing if set to true.
 	DisableHooks bool
 	// DryRun controls whether the operation is prepared, but not executed.
@@ -395,13 +397,13 @@ func (u *Upgrade) releasingUpgrade(c chan<- resultMessage, upgradedRelease *rele
 			"waiting for release %s resources (created: %d updated: %d  deleted: %d)",
 			upgradedRelease.Name, len(results.Created), len(results.Updated), len(results.Deleted))
 		if u.WaitForJobs {
-			if err := u.cfg.KubeClient.WaitWithJobs(target, u.Timeout); err != nil {
+			if err := u.cfg.KubeClient.WaitWithJobs(target, u.Timeout, u.WaitIgnoreUnschedulable); err != nil {
 				u.cfg.recordRelease(originalRelease)
 				u.reportToPerformUpgrade(c, upgradedRelease, results.Created, err)
 				return
 			}
 		} else {
-			if err := u.cfg.KubeClient.Wait(target, u.Timeout); err != nil {
+			if err := u.cfg.KubeClient.Wait(target, u.Timeout, u.WaitIgnoreUnschedulable); err != nil {
 				u.cfg.recordRelease(originalRelease)
 				u.reportToPerformUpgrade(c, upgradedRelease, results.Created, err)
 				return
@@ -475,6 +477,7 @@ func (u *Upgrade) failRelease(rel *release.Release, created kube.ResourceList, e
 		rollin.Version = filteredHistory[0].Version
 		rollin.Wait = true
 		rollin.WaitForJobs = u.WaitForJobs
+		rollin.WaitIgnoreUnschedulable = u.WaitIgnoreUnschedulable
 		rollin.DisableHooks = u.DisableHooks
 		rollin.Recreate = u.Recreate
 		rollin.Force = u.Force

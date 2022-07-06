@@ -30,11 +30,13 @@ type Interface interface {
 	// Create creates one or more resources.
 	Create(resources ResourceList) (*Result, error)
 
-	// Wait waits up to the given timeout for the specified resources to be ready.
-	Wait(resources ResourceList, timeout time.Duration) error
+	// Wait waits up to the given timeout for the specified resources to be ready on
+	// only schedulable Nodes if given ignoreUnschedulable true.
+	Wait(resources ResourceList, timeout time.Duration, ignoreUnschedulable bool) error
 
-	// WaitWithJobs wait up to the given timeout for the specified resources to be ready, including jobs.
-	WaitWithJobs(resources ResourceList, timeout time.Duration) error
+	// WaitWithJobs wait up to the given timeout for the specified resources to be ready on
+	// only schedulable Nodes if given ignoreUnschedulable true, including jobs.
+	WaitWithJobs(resources ResourceList, timeout time.Duration, ignoreUnschedulable bool) error
 
 	// Delete destroys one or more resources.
 	Delete(resources ResourceList) (*Result, []error)

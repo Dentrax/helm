@@ -52,20 +52,20 @@ func (f *FailingKubeClient) Create(resources kube.ResourceList) (*kube.Result, e
 }
 
 // Waits the amount of time defined on f.WaitDuration, then returns the configured error if set or prints.
-func (f *FailingKubeClient) Wait(resources kube.ResourceList, d time.Duration) error {
+func (f *FailingKubeClient) Wait(resources kube.ResourceList, d time.Duration, ignoreUnschedulable bool) error {
 	time.Sleep(f.WaitDuration)
 	if f.WaitError != nil {
 		return f.WaitError
 	}
-	return f.PrintingKubeClient.Wait(resources, d)
+	return f.PrintingKubeClient.Wait(resources, d, ignoreUnschedulable)
 }
 
 // WaitWithJobs returns the configured error if set or prints
-func (f *FailingKubeClient) WaitWithJobs(resources kube.ResourceList, d time.Duration) error {
+func (f *FailingKubeClient) WaitWithJobs(resources kube.ResourceList, d time.Duration, ignoreUnschedulable bool) error {
 	if f.WaitError != nil {
 		return f.WaitError
 	}
-	return f.PrintingKubeClient.WaitWithJobs(resources, d)
+	return f.PrintingKubeClient.WaitWithJobs(resources, d, ignoreUnschedulable)
 }
 
 // WaitForDelete returns the configured error if set or prints
